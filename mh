@@ -1,0 +1,99 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import sys
+from logging import getLogger, basicConfig
+
+logger = getLogger(__name__)
+logcfg = {
+  "format": "%(asctime)s.%(msecs).03d %(process)d %(thread)x %(levelname).4s;%(module)s(%(lineno)d/%(funcName)s) %(message)s",
+  #"format": "%(message)s",
+  "datefmt": "%Y/%m/%dT%H:%M:%S",
+  "level": 10,
+  "stream": sys.stdout,
+}
+basicConfig(**logcfg)
+
+import re
+import time
+import multiprocessing
+import Queue
+import pexpect
+
+# su/ssh/telnet <user>[:pass][@host]
+MHURL=r"^((?P<tag>[^:]+):){0,1}((?P<protocol>[^:]+)://){0,1}(?P<user>[^/:@]+){1}(:(?P<pass>[^:@+]+)){0,1}(@(?P<host>[^@:]+)(:(?P<port>[^:]+)){0,1}){0,1}$"
+
+spawns={
+        "ssh": ["{protocol} -p {port} {user}@{host}", { "port": 22 }],
+        }
+
+def recursive_auth(conn, parms):
+    pass
+
+def makeconn(parms):
+    return pexpect.spawn(spawns[parms["protocol"]][0].format(**parms[0]))
+
+def workerloop(que,done,parms):
+    name = parms[0].get("name") if parms[0].get("name") else "{0}@{1}".format(parms[0].get("user"),parms[0]["host"])
+    conn = recursive_auth(makeconn(parms), parms)
+    while True:
+        try:
+            l=que.get(timeout=1)
+            logger.info("{0}: {1}".format(name,l))
+        except Queue.Empty as e:
+            if done.value:
+                break
+
+def as_url(s):
+    rslt=re.search(MHURL, s)
+    return rslt.groupdict() if rslt else None
+
+def as_csv(parser,s):
+    logger.debug(s)
+    if len(s.split(',')) >1:
+        return [parser(x) for x in  s.split(',')]
+    else:
+        return [parser(s)]
+
+def as_json(parser,s):
+    logger.debug(s)
+    import json
+    try:
+        return [parser(x) for x in  json.loads(s)]
+    except ValueError as e:
+        return [parser(s)]
+
+def main(opts):
+    if opts["verbose"]: logger.info("{0}".format(opts))
+    done = multiprocessing.Value('b', False)
+    procs = []
+    for parms in [as_json(as_url, arg) for arg in opts["args"]]:
+        que = multiprocessing.JoinableQueue()
+        procs.append((multiprocessing.Process(target=workerloop, args=(que,done,parms)), que))
+    
+    for p in procs: p[0].start()
+
+    while True:
+        l=sys.stdin.readline()
+        logger.debug(l)
+        for p in procs:
+            p[1].put(l)
+
+def parsed_opts():
+    import optparse
+    import os
+
+    opt = optparse.OptionParser()
+    opt.add_option("-p", "--prof", default=False, action="store_true", help="get profile [default: %default]" )
+    opt.add_option("-v", "--verbose", default=False, action="store_true", help="show detail info [default: %default]" )
+    (opts, args)= opt.parse_args()
+    return dict(vars(opts).items() + [("args", args)])
+
+if __name__ == '__main__':
+
+    opts = parsed_opts()
+    if opts['prof']:
+      import cProfile
+      cProfile.run('main(opts)')
+      sys.exit(0)
+    main(opts)

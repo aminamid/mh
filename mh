@@ -23,19 +23,26 @@ import pexpect
 # su/ssh/telnet <user>[:pass][@host]
 MHURL=r"^((?P<tag>[^:]+):){0,1}((?P<protocol>[^:]+)://){0,1}(?P<user>[^/:@]+){1}(:(?P<pass>[^:@+]+)){0,1}(@(?P<host>[^@:]+)(:(?P<port>[^:]+)){0,1}){0,1}$"
 
-spawns={
+SPAWNS={
         "ssh": ["{protocol} -p {port} {user}@{host}", { "port": 22 }],
         }
+
+def spawn_string(spawns, parm):
+    cmd = parm["protocol"]
+    return (spawns[cmd][0].format( **dict( [(k,v) if v or not spawns[cmd][1].get(k) else (k,spawns[cmd][1][k])  for (k,v) in parm.items()] )))
 
 def recursive_auth(conn, parms):
     pass
 
 def makeconn(parms):
-    return pexpect.spawn(spawns[parms["protocol"]][0].format(**parms[0]))
+    #return (pexpect.spawn(spawn_string(SPAWNS, parms)), parms[1:])
+    return (spawn_string(SPAWNS, parms[0]), parms[1:])
 
 def workerloop(que,done,parms):
     name = parms[0].get("name") if parms[0].get("name") else "{0}@{1}".format(parms[0].get("user"),parms[0]["host"])
-    conn = recursive_auth(makeconn(parms), parms)
+    #conn = recursive_auth(makeconn(parms), parms)
+    logger.debug(makeconn(parms))
+    #logger.debug(spawn_string(SPAWNS, parms[0]))
     while True:
         try:
             l=que.get(timeout=1)

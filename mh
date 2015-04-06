@@ -9,7 +9,7 @@ logcfg = {
   #"format": "%(asctime)s.%(msecs).03d %(process)d %(thread)x %(levelname).4s;%(module)s(%(lineno)d/%(funcName)s) %(message)s",
   "format": "%(message)s",
   "datefmt": "%Y/%m/%dT%H:%M:%S",
-  "level": 10,
+  "level": 15,
   "stream": sys.stdout,
 }
 basicConfig(**logcfg)
@@ -74,8 +74,7 @@ def imupdate(default, value):
 def cmd(template, parm):
     return template[0].format(**imupdate(default=template[1], value=parm)) 
 
-@traclog
-def auth_ssh(conn, parm, procedure):
+def auth(conn, parm, procedure):
     while True:
         try:
             i = conn.expect( fsts(procedure), timeout=1 )
@@ -85,33 +84,59 @@ def auth_ssh(conn, parm, procedure):
         except pexpect.TIMEOUT as e:
             continue
 
-@traclog
+def recursive_auth(conn, parms, procedures):
+    while True:
+        if len(parms)<1: return conn
+        try:
+            conn.sendline(cmd(CMD_TMPLS[parms[0]["protocol"]], parms[0])) 
+            rslt = auth(conn, parms[0], procedures[parms[0]["protocol"]])
+            return recursive_auth(rslt, parms[1:], procedures)
+        except pexpect.TIMEOUT as e:
+            continue
+
 def makeconn(parm):
-    #return ( cmd(CMD_TMPLS[parms[0]["protocol"]], parms[0]), parms[1:])
     return pexpect.spawn(cmd(CMD_TMPLS[parm["protocol"]], parm))
 
 
-def exexpect(tag, conn, expection):
+def exexpect(tag, conn, que, expection):
     i=-1
     while i != 0:
-        i = conn.expect([expection, r"[\r\n]+", pexpect.TIMEOUT])
-        if i == 1:
+        try:
+            l=que.get(timeout=0)
+            logger.debug("{0}: {1}".format(tag,l))
+            if l=="c\n":
+                conn.sendcontrol('c')
+            else:
+                conn.send(l)
+        except Queue.Empty as e:
+            pass
+        i = conn.expect([expection, r"[\r\n]+", pexpect.TIMEOUT],timeout=1)
+        if i == 0:
+            return i
+        elif i == 1:
             logger.info("{0}: {1}".format(tag,conn.before))
+        elif i == 2:
+            continue
+        elif i == 3:
+            return None
 
 
 def workerloop(que,done,parms):
     tag = parms[0]["tag"] if parms[0].get("tag") else "{0}@{1}".format(parms[0].get("user"),parms[0]["host"])
-    conn = makeconn(parms[0])
-    conn = auth_ssh(conn, parms[0],SNDRECVS[parms[0]["protocol"]])
+    conn = auth(makeconn(parms[0]), parms[0], SNDRECVS[parms[0]["protocol"]])
+    conn = recursive_auth(conn, parms[1:], SNDRECVS)
     while True:
         try:
             l=que.get(timeout=1)
-            logger.info("{0}: {1}".format(tag,l))
+            logger.debug("{0}: {1}".format(tag,l))
             conn.send(l)
-            exexpect(tag,conn,PROMPTS)
+            exexpect(tag,conn,que,PROMPTS)
         except Queue.Empty as e:
             if done.value:
                 break
+        except pexpect.EOF as eof:
+            logger.info("{0}: {1}".format(tag,"EOF"))
+            break
 
 def as_url(s):
     rslt=re.search(MHURL, s)
@@ -133,10 +158,11 @@ def as_json(parser,s):
         return [parser(s)]
 
 def main(opts):
+    logger.debug("{0}".format(opts))
     if opts["verbose"]: logger.info("{0}".format(opts))
     done = multiprocessing.Value('b', False)
     procs = []
-    for parms in [as_json(as_url, arg) for arg in opts["args"]]:
+    for parms in [as_csv(as_url, arg) for arg in opts["args"]]:
         que = multiprocessing.JoinableQueue()
         procs.append((multiprocessing.Process(target=workerloop, args=(que,done,parms)), que))
     
@@ -144,9 +170,15 @@ def main(opts):
 
     while True:
         l=sys.stdin.readline()
-        logger.debug(l)
+        logger.debug("{0}".format(l.strip()))
+        deadps = [i for (i,p) in enumerate(procs) if not p[0].is_alive()]
+        for i in deadps:
+            procs[i][0].join()
+        procs=[p for (i,p) in enumerate(procs) if not i in deadps]
+        if not procs: break
         for p in procs:
-            p[1].put(l)
+            p[1].put("{0}".format(l))
+    logger.info("done")        
 
 def parsed_opts():
     import optparse

@@ -6,54 +6,116 @@ from logging import getLogger, basicConfig
 
 logger = getLogger(__name__)
 logcfg = {
-  "format": "%(asctime)s.%(msecs).03d %(process)d %(thread)x %(levelname).4s;%(module)s(%(lineno)d/%(funcName)s) %(message)s",
-  #"format": "%(message)s",
+  #"format": "%(asctime)s.%(msecs).03d %(process)d %(thread)x %(levelname).4s;%(module)s(%(lineno)d/%(funcName)s) %(message)s",
+  "format": "%(message)s",
   "datefmt": "%Y/%m/%dT%H:%M:%S",
   "level": 10,
   "stream": sys.stdout,
 }
 basicConfig(**logcfg)
 
-import re
+import os
 import time
+import re
 import multiprocessing
 import Queue
+import functools
 import pexpect
 
-# su/ssh/telnet <user>[:pass][@host]
-MHURL=r"^((?P<tag>[^:]+):){0,1}((?P<protocol>[^:]+)://){0,1}(?P<user>[^/:@]+){1}(:(?P<pass>[^:@+]+)){0,1}(@(?P<host>[^@:]+)(:(?P<port>[^:]+)){0,1}){0,1}$"
+os.environ["TERM"] = "dumb"
 
-SPAWNS={
+class KnownSshKey(Exception):
+    def __init__(self, key):
+        self._key = key
+    def __str__ (self):
+        return ("{0}: please confirm ~/.ssh/known_hosts".format(self._key))
+
+# su/ssh/telnet <user>[:pass][@host]
+MHURL=r"^((?P<tag>[^=]+)=){0,1}((?P<protocol>[^:]+)://){0,1}(?P<user>[^/:@]+){1}(:(?P<password>[^:@]+)){0,1}(@(?P<host>[^@:]+)(:(?P<port>[^:]+)){0,1}){0,1}$"
+
+CMD_TMPLS={
         "ssh": ["{protocol} -p {port} {user}@{host}", { "port": 22 }],
+        "telnet": ["{protocol} {host} {port}", { "port": 23 }],
+        "su": ["{protocol} - {user}", {}],
+        }
+PROMPTS="[#$%] \Z"
+SNDRECVS={
+        "ssh": [
+            ["assword: ", lambda conn, parm: conn.sendline("{password}".format(**parm))],
+            ["\(yes/no\)\?", lambda conn, parm: conn.sendline("yes")],
+            [r"@@@@@@@@", lambda conn, parm: (_ for _ in ()).throw(KnownSshKey(parm))],
+            [PROMPTS, lambda conn, parm: conn ],
+        ],
+        "su": [
+            ["assword: ", lambda conn, parm: conn.sendline("{password}".format(**parm))],
+            [PROMPTS, lambda conn, parm: conn ],
+        ],
         }
 
-def spawn_string(spawns, parm):
-    cmd = parm["protocol"]
-    return (spawns[cmd][0].format( **dict( [(k,v) if v or not spawns[cmd][1].get(k) else (k,spawns[cmd][1][k])  for (k,v) in parm.items()] )))
+def traclog( f ):
+    @functools.wraps(f)
+    def _f(*args, **kwargs):
+        logger.debug("ENTER:{0} {1}".format( f.__name__, kwargs if kwargs else args))
+        result = f(*args, **kwargs)
+        logger.debug("RETRN:{0} {1}".format( f.__name__, result))
+        return result
+    return _f
 
-def recursive_auth(conn, parms):
-    pass
+def fsts(ls):
+    return [l[0] for l in ls]
 
-def makeconn(parms):
-    #return (pexpect.spawn(spawn_string(SPAWNS, parms)), parms[1:])
-    return (spawn_string(SPAWNS, parms[0]), parms[1:])
+def snds(ls):
+    return [l[1] for l in ls]
+
+def imupdate(default, value):
+    return dict([(k,v) if v or not default.get(k) else (k, default[k]) for (k,v) in value.items()])
+
+@traclog
+def cmd(template, parm):
+    return template[0].format(**imupdate(default=template[1], value=parm)) 
+
+@traclog
+def auth_ssh(conn, parm, procedure):
+    while True:
+        try:
+            i = conn.expect( fsts(procedure), timeout=1 )
+            rslt = snds(procedure)[i](conn,parm)
+            if rslt == conn:
+                return rslt
+        except pexpect.TIMEOUT as e:
+            continue
+
+@traclog
+def makeconn(parm):
+    #return ( cmd(CMD_TMPLS[parms[0]["protocol"]], parms[0]), parms[1:])
+    return pexpect.spawn(cmd(CMD_TMPLS[parm["protocol"]], parm))
+
+
+def exexpect(tag, conn, expection):
+    i=-1
+    while i != 0:
+        i = conn.expect([expection, r"[\r\n]+", pexpect.TIMEOUT])
+        if i == 1:
+            logger.info("{0}: {1}".format(tag,conn.before))
+
 
 def workerloop(que,done,parms):
-    name = parms[0].get("name") if parms[0].get("name") else "{0}@{1}".format(parms[0].get("user"),parms[0]["host"])
-    #conn = recursive_auth(makeconn(parms), parms)
-    logger.debug(makeconn(parms))
-    #logger.debug(spawn_string(SPAWNS, parms[0]))
+    tag = parms[0]["tag"] if parms[0].get("tag") else "{0}@{1}".format(parms[0].get("user"),parms[0]["host"])
+    conn = makeconn(parms[0])
+    conn = auth_ssh(conn, parms[0],SNDRECVS[parms[0]["protocol"]])
     while True:
         try:
             l=que.get(timeout=1)
-            logger.info("{0}: {1}".format(name,l))
+            logger.info("{0}: {1}".format(tag,l))
+            conn.send(l)
+            exexpect(tag,conn,PROMPTS)
         except Queue.Empty as e:
             if done.value:
                 break
 
 def as_url(s):
     rslt=re.search(MHURL, s)
-    return rslt.groupdict() if rslt else None
+    return imupdate( default={"protocol":"ssh"}, value=rslt.groupdict() ) if rslt else None
 
 def as_csv(parser,s):
     logger.debug(s)

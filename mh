@@ -121,7 +121,7 @@ def exexpect(tag, conn, que, expection):
             return None
 
 
-def workerloop(que,done,parms):
+def workerloop(que,done,parms,opts):
     tag = parms[0]["tag"] if parms[0].get("tag") else "{0}@{1}".format(parms[0].get("user"),parms[0]["host"])
     conn = auth(makeconn(parms[0]), parms[0], SNDRECVS[parms[0]["protocol"]])
     conn = recursive_auth(conn, parms[1:], SNDRECVS)
@@ -130,7 +130,7 @@ def workerloop(que,done,parms):
             l=que.get(timeout=1)
             logger.debug("{0}: {1}".format(tag,l))
             conn.send(l)
-            exexpect(tag,conn,que,PROMPTS)
+            exexpect(tag,conn,que, PROMPTS)
         except Queue.Empty as e:
             if done.value:
                 break
@@ -164,10 +164,10 @@ def main(opts):
     procs = []
     for parms in [as_csv(as_url, arg) for arg in opts["args"]]:
         que = multiprocessing.JoinableQueue()
-        procs.append((multiprocessing.Process(target=workerloop, args=(que,done,parms)), que))
+        procs.append((multiprocessing.Process(target=workerloop, args=(que,done,parms,opts)), que))
     
     for p in procs: p[0].start()
-
+    time.sleep(opts["wait"])
     while True:
         l=sys.stdin.readline()
         logger.debug("{0}".format(l.strip()))
@@ -187,6 +187,7 @@ def parsed_opts():
     opt = optparse.OptionParser()
     opt.add_option("-p", "--prof", default=False, action="store_true", help="get profile [default: %default]" )
     opt.add_option("-v", "--verbose", default=False, action="store_true", help="show detail info [default: %default]" )
+    opt.add_option("-w", "--wait", default=0, type="int", help="wait time to first command [default: %default]" )
     (opts, args)= opt.parse_args()
     return dict(vars(opts).items() + [("args", args)])
 
